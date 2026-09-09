@@ -1,0 +1,21 @@
+/* アプリ全体のシェル: 上部の細い操作バー（ライブラリ選択 + 設定）+ 残り全部がフィード。 */
+.dt-app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: #000;
+}
+
+.dt-topbar {
+  flex: 0 0 auto;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: #0a0a0a;
+  border-bottom: 1px solid #262626;
+}
+
+.dt-feed-area {
+  position: relative; /* .dt-hud の position:absolute の基準にする */
+  flex: 1;
+  min-height: 0; /* flex item を正しく縮めてスクロール可能にする定番の対策 */
+}

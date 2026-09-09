@@ -1,0 +1,55 @@
+/*
+ * root（main.ts が渡す calibrationRoot）自体をオーバーレイにする。.dt-feed-area は
+ * position:relative なので、これを基準に画面いっぱいに重なる（.dt-hud の z-index:20
+ * より上の 30 にして、キャリブレーション中は HUD の表示より優先させる）。
+ */
+.dt-calibration-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.85);
+}
+
+.dt-calibration-wizard {
+  max-width: 28rem;
+  margin: 1rem;
+  padding: 1.5rem;
+  background: #171717;
+  color: #f5f5f5;
+  border-radius: 0.5rem;
+  font-family: system-ui, sans-serif;
+  text-align: center;
+}
+
+.dt-calibration-wizard h2 {
+  margin-top: 0;
+}
+
+.dt-calibration-wizard button {
+  margin-top: 1rem;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  background: #4ade80;
+  color: #0a0a0a;
+  border: none;
+  border-radius: 0.375rem;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.dt-calibration-wizard button:hover {
+  background: #86efac;
+}
+
+.dt-calibration-wizard__error {
+  color: #f87171;
+}
+
+.dt-calibration-wizard__success {
+  color: #4ade80;
+  font-size: 1.25rem;
+  font-weight: 700;
+}

@@ -1,0 +1,24 @@
+/*
+ * 鏡像表示: video/canvas 両方に scaleX(-1) を掛ける。MoveNet の flipHorizontal は
+ * 実装上効かない（黙って無視される）ので、キーポイントは生座標のまま描画し、
+ * 表示だけ CSS で反転させる。両方に同じ変換を掛けているので座標系は一致する。
+ */
+.dt-camera-preview {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  overflow: hidden;
+  border-radius: 0.5rem;
+}
+
+.dt-camera-preview__video,
+.dt-camera-preview__overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: scaleX(-1);
+  object-fit: cover;
+}
