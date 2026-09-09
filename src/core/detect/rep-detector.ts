@@ -6,13 +6,37 @@ import { evaluateRejects } from './validity';
 export interface DetectorConfig {
   readonly topThreshold: number; // 既定 0.80  ★invariant: bottomThreshold + 0.3 <= topThreshold
   readonly bottomThreshold: number; // 既定 0.20
-  readonly minConcentricMs: Ms; // 既定 400
+  /**
+   * 挙上の最短時間。★意味は「下端ゾーン(bottomThreshold)を出てから上端に到達するまで」。
+   *
+   * かつては「下端ゾーンに入ってから上端に到達するまで」だった。連続的な往復運動では
+   * それが真の挙上時間に近い値になる（周期1500msの正弦なら 750ms）が、下端で休むと
+   * 休憩時間まで含まれてしまい、4秒以上休むと次のレップが必ず too_slow になるという
+   * バグの原因だった（per-slide 方式では1レップごとに動画を30秒見る＝下端で30秒休むので
+   * 致命的）。定義を「下端ゾーンを出てから」に変えて休憩時間の混入を無くした。
+   *
+   * その代わり測る区間が 0.2→0.8 の通過時間だけになり、同じ動作でも値が小さくなる
+   * （周期1500msの正弦で 750ms → 307ms）。したがって既定値も 400 から下げてある。
+   * 180ms は「周期880msより速い往復を弾く」に相当し、それより速いのは反動を使った
+   * 振り回しとみなせる。チャタリング（閾値近傍の振動）はそもそも 0.2→0.8 を
+   * 通過できないので、この値に依存せず弾かれる。
+   */
+  readonly minConcentricMs: Ms; // 既定 180
   readonly maxConcentricMs: Ms; // 既定 4000
   readonly minEccentricMs: Ms; // 既定 500  ← テンポゲート＝速度上限の実体
   readonly minInterRepMs: Ms; // 既定 500
   readonly minRomRatio: number; // 既定 0.70
   readonly minScore: number; // 既定 0.30  フレーム破棄の閾値
-  readonly warnScore: number; // 既定 0.50
+  /**
+   * これを下回るフレームが1枚でもレップ中にあると 'low_confidence' で無効にする。
+   *
+   * ★ 0.5 から 0.35 に下げた。キャリブレーションの受理ゲート
+   * （MIN_SCORE_FOR_CALIBRATION = 0.35）より厳しいと、
+   * **キャリブレーションは通るのに運動すると全レップ弾かれる**という矛盾になる。
+   * 実機の実測でキーポイント score の p10 が 0.43-0.45 だったため、0.5 では
+   * 平常時から下回っており、ほぼ全レップが無効になっていた。
+   */
+  readonly warnScore: number; // 既定 0.35
   readonly lostAfterMs: Ms; // 既定 700
   readonly filterResetGapMs: Ms; // 既定 300
   readonly filter: OneEuroConfig;
@@ -21,13 +45,13 @@ export interface DetectorConfig {
 export const DEFAULT_DETECTOR_CONFIG: DetectorConfig = {
   topThreshold: 0.8,
   bottomThreshold: 0.2,
-  minConcentricMs: 400,
+  minConcentricMs: 180,
   maxConcentricMs: 4000,
   minEccentricMs: 500,
   minInterRepMs: 500,
   minRomRatio: 0.7,
   minScore: 0.3,
-  warnScore: 0.5,
+  warnScore: 0.35,
   lostAfterMs: 700,
   filterResetGapMs: 300,
   filter: { minCutoff: 1.0, beta: 1.0, dCutoff: 1.0 },
@@ -37,12 +61,30 @@ export type DetectorOutput =
   | { readonly type: 'progress'; readonly value: number; readonly phase: RepPhase }
   | { readonly type: 'rep'; readonly rep: RepEvent }
   | { readonly type: 'tracking'; readonly state: TrackingState }
-  | { readonly type: 'diagnostic'; readonly hint: 'threshold_unreachable'; readonly observedMax: number };
+  | {
+      readonly type: 'diagnostic';
+      readonly hint: DetectorDiagnosticHint;
+      readonly observedMax: number;
+      readonly observedMin: number;
+    };
+
+/**
+ * 沈黙診断の種類。
+ *
+ * ★ 'bottom_unreachable' は後から足した。もともと「上端に届かない」だけを見ていたが、
+ * 実機の信号グラフで**上端は超えているのに谷が 0.6 止まりで下端(0.2)に戻らない**
+ * ケースを踏んだ。シュミットトリガは「下端に入ってから上端を超える」ことでレップを
+ * 数えるので、下端に戻らなければレップは永久に0のまま。しかも旧診断の条件は
+ * `sessionMax < topThreshold` だったため、この状況では**何の警告も出ない**という
+ * 一番まずい沈黙が起きていた。
+ */
+export type DetectorDiagnosticHint = 'top_unreachable' | 'bottom_unreachable';
 
 export interface DetectorState {
   readonly phase: RepPhase;
   readonly lost: boolean;
   readonly sessionMax: number;
+  readonly sessionMin: number;
 }
 
 export interface RepDetector {
@@ -80,6 +122,7 @@ export function createRepDetector(cfg: DetectorConfig, cal: Calibration, side: A
   let lastRepAt: Ms = -Infinity;
   let repId = 0;
   let sessionMax = 0;
+  let sessionMin = 1;
   let lastRepOrDiagAt: Ms = -Infinity;
 
   function abortRep(): void {
@@ -162,7 +205,15 @@ export function createRepDetector(cfg: DetectorConfig, cal: Calibration, side: A
     }
     const xf = filter.filter(x, t / 1000);
     lastT = t;
+    // ★沈黙診断の起点を最初の有効サンプルで打つ。-Infinity のままだと
+    // 「t - (-Infinity) = Infinity > 15秒」が初回フレームから成立してしまい、
+    // **1本目のレップの上昇中**（sessionMax が 0.35 を超えて 0.8 に届く前の一瞬）に
+    // 誤診断が飛ぶ。pose-source が診断を捨てていた間は誰にも見えていなかったが、
+    // HUD に配線した以上、運動開始直後に嘘の警告が出る実バグになる。
+    if (lastRepOrDiagAt === -Infinity) lastRepOrDiagAt = t;
+
     sessionMax = Math.max(sessionMax, xf);
+    sessionMin = Math.min(sessionMin, xf);
 
     out.push({ type: 'progress', value: clamp01(xf), phase });
 
@@ -183,6 +234,21 @@ export function createRepDetector(cfg: DetectorConfig, cal: Calibration, side: A
         topAt = t;
       }
     } else if (phase === 'at-bottom') {
+      // ★下端ゾーンに留まっている間は「レップの起点」を打ち直す。
+      //
+      // concentricMs は「実際に持ち上げた時間」でなければならず、下端で休んでいた
+      // 時間を含めてはいけない。これを直さないと per-slide 方式（1レップごとに動画を
+      // 30秒見る＝下端で30秒休む）で2本目以降が必ず too_slow で無効になる。
+      //
+      // repMinScore も同じ理由でここでリセットする。あちらは「レップ中の最低
+      // キーポイント信頼度」だが、下端の休憩を含めると**30秒のうち1フレーム
+      // 落ちただけで次のレップが low_confidence になる**（＝「実際に挙げても
+      // カウントされない」の主因）。測る範囲は挙上動作そのものに限る。
+      if (xf <= cfg.bottomThreshold) {
+        bottomAt = t;
+        repMinScore = sample.score;
+      }
+
       if (xf >= cfg.topThreshold) {
         // ★ここでレップ成立。1周期の完了を待たない。
         const rep = buildRep(t, xf);
@@ -198,12 +264,22 @@ export function createRepDetector(cfg: DetectorConfig, cal: Calibration, side: A
       }
     }
 
-    // (5) 沈黙診断 — 信号は動いているのにレップが出ない = 閾値に届いていない。
-    // 黙ってゼロを出し続けない（これが無いと「壊れている」と誤解されて詰む）。
-    if (t - lastRepOrDiagAt > DIAG_SILENCE_MS && sessionMax > DIAG_MIN_OBSERVED_MAX && sessionMax < cfg.topThreshold) {
-      out.push({ type: 'diagnostic', hint: 'threshold_unreachable', observedMax: sessionMax });
-      lastRepOrDiagAt = t;
-      sessionMax = 0;
+    // (5) 沈黙診断 — 信号は動いているのにレップが出ない = どちらかの閾値に届いていない。
+    // 黙ってゼロを出し続けない（これが無いと「カールしてるのに数が増えない、理由が
+    // 分からない」でプロジェクトが死ぬ）。上端と下端の両方を見る。
+    if (t - lastRepOrDiagAt > DIAG_SILENCE_MS && sessionMax > DIAG_MIN_OBSERVED_MAX) {
+      const hint: DetectorDiagnosticHint | null =
+        sessionMax < cfg.topThreshold
+          ? 'top_unreachable'
+          : sessionMin > cfg.bottomThreshold
+            ? 'bottom_unreachable'
+            : null;
+      if (hint) {
+        out.push({ type: 'diagnostic', hint, observedMax: sessionMax, observedMin: sessionMin });
+        lastRepOrDiagAt = t;
+        sessionMax = 0;
+        sessionMin = 1;
+      }
     }
 
     return out;
@@ -220,10 +296,11 @@ export function createRepDetector(cfg: DetectorConfig, cal: Calibration, side: A
       abortRep();
       lastRepAt = -Infinity;
       sessionMax = 0;
+      sessionMin = 1;
       lastRepOrDiagAt = -Infinity;
     },
     snapshot(): DetectorState {
-      return { phase, lost, sessionMax };
+      return { phase, lost, sessionMax, sessionMin };
     },
   };
 }

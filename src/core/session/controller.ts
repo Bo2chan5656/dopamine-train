@@ -1,5 +1,6 @@
 import type { CreditLedger } from '../credit/ledger';
 import type { CreditPolicy } from '../credit/policy';
+import type { DetectorDiagnosticHint } from '../detect/rep-detector';
 import type { Ms, RejectReason } from '../types';
 // 型のみの import。verbatimModuleSyntax によりランタイムコードは一切生成されない
 // ので、core/ の「DOM 依存ゼロ」原則は破れない（RepSource/Slider の実装が window や
@@ -16,6 +17,22 @@ export interface HudViewModel {
   readonly locked: boolean;
   /** 直近の無効レップの理由。日本語化は ui/hud.ts 側の責務。 */
   readonly lastRejectReasons: readonly RejectReason[];
+  /**
+   * 直近レップの実測値。理由の文言だけでは「どれくらい足りないのか」が分からず
+   * 対処できないので、閾値と並べて出すために持つ（'速すぎます' が 380ms なのか
+   * 50ms なのかで話が変わる）。
+   */
+  readonly lastRepMetrics: {
+    readonly minScore: number;
+    readonly concentricMs: Ms;
+    readonly romRatio: number;
+  } | null;
+  /**
+   * 沈黙診断（上端に届かない / 下端に戻らない）。レップが1つも出ないまま15秒
+   * 経過したときに出る。これを HUD に出さないと「動かしているのに数が増えない、
+   * 理由が分からない」で行き詰まる。
+   */
+  readonly diagnostic: DetectorDiagnosticHint | null;
 }
 
 /** UI 実装を core から隠す最小ポート。ui/hud.ts がこれを実装する。 */
@@ -74,6 +91,8 @@ export interface SessionControllerDeps {
 export class SessionController {
   private readonly unsubscribes: Array<() => void> = [];
   private lastRejectReasons: readonly RejectReason[] = [];
+  private lastRepMetrics: HudViewModel['lastRepMetrics'] = null;
+  private diagnostic: DetectorDiagnosticHint | null = null;
   private lastTickAt: Ms | null = null;
   private lastRefreshAt: Ms = 0;
 
@@ -85,6 +104,12 @@ export class SessionController {
     this.unsubscribes.push(
       source.events.on('rep', (rep) => {
         this.lastRejectReasons = rep.valid ? [] : rep.rejects;
+        this.lastRepMetrics = {
+          minScore: rep.minScore,
+          concentricMs: rep.concentricMs,
+          romRatio: rep.romRatio,
+        };
+        this.diagnostic = null; // レップが出た = 閾値には届いている
         if (rep.valid) this.deps.sound.rep();
         else this.deps.sound.invalid();
         ledger.creditRep(rep, this.deps.clock.wall());
@@ -122,6 +147,12 @@ export class SessionController {
       }),
     );
     this.unsubscribes.push(ledger.events.on('changed', () => this.renderHud()));
+    this.unsubscribes.push(
+      source.events.on('diagnostic', ({ hint }) => {
+        this.diagnostic = hint;
+        this.renderHud();
+      }),
+    );
 
     source.start();
 
@@ -176,6 +207,8 @@ export class SessionController {
       dailyRepCap: settings.credit.dailyRepCap,
       locked: ledger.balanceSeconds <= 0,
       lastRejectReasons: this.lastRejectReasons,
+      lastRepMetrics: this.lastRepMetrics,
+      diagnostic: this.diagnostic,
     });
   }
 }

@@ -1,9 +1,15 @@
-import type { Calibration, CalibrationSample } from '../../core/detect/calibration';
-import { summarize } from '../../core/detect/calibration';
+import type { ArmCapture, Calibration } from '../../core/detect/calibration';
+import { summarizeCapture } from '../../core/detect/calibration';
 import { createRepDetector, DEFAULT_DETECTOR_CONFIG, type DetectorConfig } from '../../core/detect/rep-detector';
-import { createSignalExtractor, type SignalExtractor } from '../../core/detect/signal';
+import {
+  createSignalExtractor,
+  probeFrame,
+  type FrameProbe,
+  type FrameSize,
+  type SignalExtractor,
+} from '../../core/detect/signal';
 import { Emitter } from '../../core/emitter';
-import type { ArmSide, Landmarks, Ms, SignalSample } from '../../core/types';
+import type { ArmSide, Landmarks, Ms, SignalKind, SignalSample } from '../../core/types';
 import type { RepSource, RepSourceEvents } from '../rep-source';
 import { createCamera, type Camera, type FrameMeta } from './camera';
 import { armLengthPx, getArmKeypoints } from './keypoints';
@@ -42,13 +48,29 @@ export interface PoseSource extends RepSource {
   /** 直近フレームの生キーポイント（ui/camera-preview.ts の骨格オーバーレイ描画用）。 */
   lastKeypoints(): MoveNetPose['keypoints'] | null;
   /**
-   * windowMs 間、現在の signal/side 設定のまま生の信号をサンプリングして代表値を
-   * 返す（calibration-wizard.ts 用）。サンプリング中は detector に流さない
+   * windowMs 間、**両腕**の生信号と体の向きを観測して代表値を返す
+   * （calibration-wizard.ts 用）。観測中は detector に流さない
    * （キャリブレーション前の未確定な値でレップ判定を汚さないため）。
+   *
+   * ★ 両腕を測るのは、カメラを体の左右どちらの斜め45度に置いても使えるように
+   * するため。どちらの腕を使うかは resolveCalibration() が測定値から決める。
+   *
+   * ★ signal を**引数で受け取る**。以前は内部の config.calibration.signal を
+   * 使っていたが、キャリブレーション前のそれは仮の DEFAULT_CALIBRATION の値
+   * （'elbow-angle'）でしかなく、ウィザードが検証に使う信号と食い違った。
+   * 結果「記録は肘角度、判定は手首高さの規則」となり、正しい順で撮っても
+   * 必ず inverted になるバグを踏んだ（実機で確認: 下端175.60 / 上端18.77 で
+   * 手首高さの向き判定が偽になる）。「何の信号を測るか」を知っているのは
+   * 呼び出し側なので、引数にして食い違いを構造的に不可能にする。
    */
-  sample(windowMs: Ms): Promise<CalibrationSample>;
-  /** 直近フレームの上腕長（ピクセル）。キャリブレーション記録時の診断値に使う。 */
+  probe(windowMs: Ms, signal: SignalKind): Promise<ArmCapture>;
+  /** 直近フレームの上腕長（ピクセル）。dev panel 等の即時表示用。 */
   currentArmLengthPx(): number | null;
+  /**
+   * 現在の映像サイズ。キーポイントが画面端/画面外に出ているかの判定に使う
+   * （「腕を下ろしたら手首がフレームから切れている」を数字で示すため）。
+   */
+  frameSize(): FrameSize | null;
 }
 
 /**
@@ -66,36 +88,44 @@ export function createPoseSource(initial: Partial<PoseSourceConfig> = {}): PoseS
   let inferMsEma = 0;
   let lastKeypoints: MoveNetPose['keypoints'] | null = null;
 
-  // sample() 実行中だけ使う一時状態。同時に1つのサンプリングしか許可しない
+  // probe() 実行中だけ使う一時状態。同時に1つの観測しか許可しない
   // （calibration-wizard.ts は1ステップずつ順番に呼ぶ前提）。
-  let samplingUntil: Ms | null = null;
-  let samplingBuffer: SignalSample[] = [];
-  let samplingResolve: ((s: CalibrationSample) => void) | null = null;
+  let probingUntil: Ms | null = null;
+  let probeBuffer: FrameProbe[] = [];
+  /** 姿勢が取れなかったフレーム数。★代表値には入れず、ここで数えるだけ。 */
+  let probeDropped = 0;
+  let probeResolve: ((c: ArmCapture) => void) | null = null;
+  /** probe() 実行中に測る信号。★呼び出し側が指定した値であり、config とは独立。 */
+  let probeSignal: SignalKind = 'elbow-angle';
   // init() の時点でフレームポンプは開始する（sample() をキャリブレーション中に
   // 使うため）が、レップ判定は明示的に start() が呼ばれるまで無効にしておく —
   // 仮のキャリブレーションのままレップイベントが飛び続けるのを防ぐ。
   let detectorEnabled = false;
 
+  function currentFrameSize(): FrameSize | null {
+    const v = camera.video;
+    return v.videoWidth > 0 && v.videoHeight > 0 ? { width: v.videoWidth, height: v.videoHeight } : null;
+  }
+
+  function finishProbe(): void {
+    const result = summarizeCapture(probeBuffer, probeDropped);
+    probingUntil = null;
+    probeBuffer = [];
+    probeDropped = 0;
+    probeResolve?.(result);
+    probeResolve = null;
+  }
+
   function feedDetector(sample: SignalSample): void {
-    if (samplingUntil !== null) {
-      samplingBuffer.push(sample);
-      if (sample.at >= samplingUntil) {
-        const result = summarize(samplingBuffer);
-        samplingUntil = null;
-        samplingBuffer = [];
-        samplingResolve?.(result);
-        samplingResolve = null;
-      }
-      return; // サンプリング中は detector に渡さない
-    }
     if (!detectorEnabled) return;
     for (const o of detector.update(sample)) {
       if (o.type === 'rep') events.emit('rep', o.rep);
       else if (o.type === 'progress') events.emit('progress', { value: o.value, phase: o.phase, at: sample.at });
       else if (o.type === 'tracking') events.emit('tracking', o.state);
-      // 'diagnostic'（threshold_unreachable）は RepSourceEvents.diag（fps/inferMs/dropped、
-      // カメラ性能の話）とは別物なので、そちらには流さない。dev-panel は detector の
-      // 'progress' 系列を直接見て閾値到達の可否を判断する。
+      // 'diagnostic' は 'diag'（fps/inferMs/dropped＝カメラ性能の話）とは別物なので、
+      // 専用の 'diagnostic' イベントで流す。★ここで捨ててはいけない — 捨てると
+      // 「カールしてるのにレップが増えない、理由が分からない」が起きる。
+      else events.emit('diagnostic', { hint: o.hint, observedMax: o.observedMax, observedMin: o.observedMin });
     }
   }
 
@@ -107,15 +137,47 @@ export function createPoseSource(initial: Partial<PoseSourceConfig> = {}): PoseS
     inferMsEma = inferMsEma === 0 ? inferMs : inferMsEma * 0.8 + inferMs * 0.2;
     lastKeypoints = pose?.keypoints ?? null; // camera-preview の骨格オーバーレイ用
 
-    // pose が取れない/必要なキーポイントが欠ける場合も score=0 のダミーサンプルとして
+    const lm: Landmarks | null = pose ? { at: meta.captureAtMs, kp: pose.keypoints } : null;
+
+    if (probingUntil !== null) {
+      // ★キャリブレーション記録中。姿勢が取れたフレームだけを代表値の計算に入れる。
+      // 以前は下の「score:0 のダミーサンプル」がそのまま記録バッファに入っており、
+      // 1秒の記録中に1フレームでも姿勢を落とすと minScore が 0 になって
+      // low_confidence 確定で失敗する、という実質的なバグになっていた。
+      // 姿勢が取れなかったフレームは欠測であって観測値ではない。
+      if (lm) probeBuffer.push(probeFrame(lm, probeSignal, currentFrameSize()));
+      else probeDropped += 1;
+      if (meta.captureAtMs >= probingUntil) finishProbe();
+      // 観測中は detector に流さない（未確定のキャリブレーションでレップ判定を汚さない）
+      emitDiag();
+      return;
+    }
+
+    // pose が取れない/必要なキーポイントが欠ける場合は score=0 のダミーサンプルとして
     // detector に渡す。「一定時間見失った」の判定(lost)は detector 側に一元化する
     // （ここで独自に lost を判定すると detector のステートマシンと二重管理になる）。
-    const lm: Landmarks | null = pose ? { at: meta.captureAtMs, kp: pose.keypoints } : null;
     const sample = lm ? extractor.extract(lm, config.side) : null;
     feedDetector(sample ?? { at: meta.captureAtMs, raw: 0, score: 0 });
+    emitDiag();
+  }
 
+  function emitDiag(): void {
     const stats = camera.getStats();
-    events.emit('diag', { fps: stats.fps, inferMs: Math.round(inferMsEma), dropped: stats.dropInFlight + stats.dropPacing });
+    events.emit('diag', {
+      fps: stats.fps,
+      inferMs: Math.round(inferMsEma),
+      dropped: stats.dropInFlight + stats.dropPacing,
+      source: stats.source,
+      joints: activeJointScores(),
+    });
+  }
+
+  /** 判定に使っている側の腕の関節別 score。dev panel のライブ表示用。 */
+  function activeJointScores(): { shoulder: number; elbow: number; wrist: number } | null {
+    if (!lastKeypoints) return null;
+    const side = config.side === 'both' ? 'left' : config.side;
+    const probe = probeFrame({ at: 0, kp: lastKeypoints }, config.calibration.signal, currentFrameSize());
+    return side === 'left' ? probe.left.scores : probe.right.scores;
   }
 
   return {
@@ -169,15 +231,20 @@ export function createPoseSource(initial: Partial<PoseSourceConfig> = {}): PoseS
       return lastKeypoints;
     },
 
-    sample(windowMs: Ms): Promise<CalibrationSample> {
-      // 前回のサンプリングが何らかの理由で終わっていなければ、空扱いで即座に片付ける
+    probe(windowMs: Ms, signal: SignalKind): Promise<ArmCapture> {
+      // 前回の観測が何らかの理由で終わっていなければ、そこまでの分で即座に片付ける
       // （calibration-wizard.ts は直列にしか呼ばないはずだが、多重起動の防御）。
-      samplingResolve?.(summarize(samplingBuffer));
-      samplingBuffer = [];
-      return new Promise<CalibrationSample>((resolve) => {
-        samplingResolve = resolve;
-        samplingUntil = performance.now() + windowMs;
+      if (probeResolve) finishProbe();
+      return new Promise<ArmCapture>((resolve) => {
+        probeResolve = resolve;
+        probeSignal = signal;
+        probeBuffer = [];
+        probeDropped = 0;
+        probingUntil = performance.now() + windowMs;
       });
+    },
+    frameSize(): FrameSize | null {
+      return currentFrameSize();
     },
     currentArmLengthPx(): number | null {
       if (!lastKeypoints) return null;

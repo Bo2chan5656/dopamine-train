@@ -3,6 +3,7 @@ import { perSlidePreset, type CreditPolicy } from '../src/core/credit/policy';
 import type { Calibration } from '../src/core/detect/calibration';
 import { SessionController, type Settings } from '../src/core/session/controller';
 import { createKeyboardSource } from '../src/sensors/keyboard-source';
+import { DEFAULT_DETECTOR_CONFIG } from '../src/core/detect/rep-detector';
 import { createPoseSource } from '../src/sensors/pose/pose-source';
 import {
   hasSavedSettings,
@@ -36,10 +37,31 @@ import './trainer.css';
  * per-slide 分岐と maxTickDtMs だけで、どちらも DOM/chrome.* に依存しない）。
  */
 
-// M4 で実機未確認のため仮決め（README の M4 セクション参照）。
+/**
+ * 使う信号。★実機の計測結果に基づき elbow-angle を採用（M4 で保留していた判断）。
+ *
+ * 実機のキャリブレーションで得られた値:
+ *   ROM 156.83°（下端 175.60° → 上端 18.77°）／ 信頼度 p10 = 0.43-0.45
+ *   推定した向き = 斜め45度（肩幅/上腕長 = 0.85）／ 欠測フレーム 0
+ * フルレンジのカールがそのまま素直な角度変化として出ており、信号として理想的。
+ *
+ * 一度 wrist-height に切り替えたが、それは「体が正面を向いている」という前提での
+ * 判断だった。肩幅/上腕長 の実測が 0.85（=斜め45度）だったため前提が誤りで、
+ * elbow-angle が退化する条件（正面向き）には該当していなかった。
+ *
+ * ★ ただし elbow-angle は正面向きだと原理的に退化する（前腕がカメラに向かって
+ * 振り上がり、画像上で肩・肘・手首が一直線に潰れる）。立ち位置を変えて正面向きに
+ * なる場合は 'wrist-height' に切り替えること。あちらは (肩y − 手首y)/上腕長 なので
+ * 正面でも退化しないが、肩の上下動（すくめる・傾く）の影響を受ける。
+ * SignalExtractor で差し替え可能な設計なので、この1行を変えるだけで切り替わる。
+ *
+ * ★ 腕の左右とカメラの向きはもう宣言しない。キャリブレーションが両腕を同時に
+ * 観測して「実際に動かした腕」を選び、体の向きも肩幅/上腕長から推定する
+ * （calibration.ts の resolveCalibration）。
+ */
 const SIGNAL_KIND = 'elbow-angle' as const;
-const ARM_SIDE = 'right' as const;
-const CAMERA_VIEW = 'side45' as const;
+/** キャリブレーション前の暫定値。この間 detector は無効なので実質使われない。 */
+const INITIAL_ARM_SIDE = 'right' as const;
 
 /**
  * ★ tick の駆動を rAF ではなく setInterval にしている。トレーナーウィンドウは
@@ -90,7 +112,7 @@ topbar.appendChild(note);
 
 // null 合体で分岐させ、後段でのキャストを避ける（PoseSource 固有のメソッドを
 // 使うのはカメラモードだけなので、型ごと分けて持つ）。
-const poseSource = useKeyboard ? null : createPoseSource({ side: ARM_SIDE });
+const poseSource = useKeyboard ? null : createPoseSource({ side: INITIAL_ARM_SIDE });
 const source = poseSource ?? createKeyboardSource();
 
 const hud = createHud(feedArea);
@@ -162,6 +184,8 @@ if (!poseSource) {
 } else {
   const preview = createCameraPreview(topbar);
   const devPanel = createDevPanel(topbar);
+  devPanel.setThresholds(DEFAULT_DETECTOR_CONFIG.bottomThreshold, DEFAULT_DETECTOR_CONFIG.topThreshold);
+  devPanel.setWarnScore(DEFAULT_DETECTOR_CONFIG.warnScore);
   poseSource.events.on('progress', ({ value, at }) => devPanel.pushSignal(value, at));
   poseSource.events.on('tracking', (state) => devPanel.updateTracking(state));
   poseSource.events.on('diag', (diag) => devPanel.updateDiag(diag));
@@ -179,10 +203,9 @@ if (!poseSource) {
   createCalibrationWizard(calibrationRoot, {
     source: poseSource,
     signal: SIGNAL_KIND,
-    side: ARM_SIDE,
-    view: CAMERA_VIEW,
     onComplete(calibration: Calibration) {
-      poseSource.reconfigure({ calibration, side: ARM_SIDE });
+      // ★ side は宣言ではなくキャリブレーションが選んだ結果を使う。
+      poseSource.reconfigure({ calibration, side: calibration.side });
       calibrationRoot.remove();
       startRunLoop();
     },

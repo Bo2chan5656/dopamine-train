@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createElbowAngleExtractor, createSignalExtractor, createWristHeightExtractor } from '../src/core/detect/signal';
+import {
+  createElbowAngleExtractor,
+  createSignalExtractor,
+  createWristHeightExtractor,
+  probeFrame,
+} from '../src/core/detect/signal';
 import type { Landmark, Landmarks } from '../src/core/types';
 
 function lm(x: number, y: number, score = 1): Landmark {
@@ -136,5 +141,110 @@ describe('createSignalExtractor', () => {
   it('kind に応じて正しい実装を返す', () => {
     expect(createSignalExtractor('elbow-angle').kind).toBe('elbow-angle');
     expect(createSignalExtractor('wrist-height').kind).toBe('wrist-height');
+  });
+});
+
+describe('probeFrame — 両腕 + 体の向きの同時観測', () => {
+  /**
+   * 斜め45度想定のフレームを作る。肩は水平に shoulderSepPx 離れ、上腕は
+   * 長さ 100px で真下に伸びる（＝上腕長が必ず 100 になる）ようにしておく。
+   */
+  function bothArms(opts: {
+    readonly shoulderSepPx: number;
+    readonly leftWrist: Landmark;
+    readonly rightWrist: Landmark;
+    readonly leftScore?: number;
+    readonly rightScore?: number;
+  }): Landmarks {
+    const ls = opts.leftScore ?? 1;
+    const rs = opts.rightScore ?? 1;
+    return landmarksAt(0, {
+      5: lm(0, 0, ls), // 左肩
+      7: lm(0, 100, ls), // 左肘（上腕長 100）
+      9: opts.leftWrist,
+      6: lm(opts.shoulderSepPx, 0, rs), // 右肩
+      8: lm(opts.shoulderSepPx, 100, rs), // 右肘（上腕長 100）
+      10: opts.rightWrist,
+    });
+  }
+
+  it('左右それぞれの信号を同時に返す', () => {
+    const l = bothArms({
+      shoulderSepPx: 90,
+      leftWrist: lm(0, 200), // 伸展（一直線）
+      rightWrist: lm(90 + 100, 100), // 屈曲（真横に折れる）
+    });
+    const p = probeFrame(l, 'elbow-angle');
+    expect(p.left.sample?.raw).toBeCloseTo(180, 0);
+    expect(p.right.sample?.raw).toBeCloseTo(90, 0);
+  });
+
+  it('肩幅/上腕長を返す（上腕長 100px、肩幅 90px → 0.9）', () => {
+    const p = probeFrame(
+      bothArms({ shoulderSepPx: 90, leftWrist: lm(0, 200), rightWrist: lm(90, 200) }),
+      'elbow-angle',
+    );
+    expect(p.shoulderRatio).toBeCloseTo(0.9);
+    expect(p.armLenPx).toBeCloseTo(100);
+  });
+
+  it('★カメラからの距離が変わっても肩幅比は不変（上腕長で割っているため）', () => {
+    // 全体を半分のスケールにしても比は変わらない = 距離に対してスケール不変。
+    const near = probeFrame(
+      bothArms({ shoulderSepPx: 90, leftWrist: lm(0, 200), rightWrist: lm(90, 200) }),
+      'elbow-angle',
+    );
+    const far = landmarksAt(0, {
+      5: lm(0, 0),
+      7: lm(0, 50),
+      9: lm(0, 100),
+      6: lm(45, 0),
+      8: lm(45, 50),
+      10: lm(45, 100),
+    });
+    expect(probeFrame(far, 'elbow-angle').shoulderRatio).toBeCloseTo(near.shoulderRatio!);
+    expect(probeFrame(far, 'elbow-angle').armLenPx).toBeCloseTo(50); // 上腕長だけは半分になる
+  });
+
+  it('肩の score が低いと向きの指標は null になる（信号自体は返す）', () => {
+    const p = probeFrame(
+      bothArms({
+        shoulderSepPx: 90,
+        leftWrist: lm(0, 200, 0.9),
+        rightWrist: lm(90, 200, 0.9),
+        leftScore: 0.1,
+        rightScore: 0.1,
+      }),
+      'elbow-angle',
+    );
+    expect(p.shoulderRatio).toBeNull();
+    expect(p.left.sample).not.toBeNull(); // 信号は score 付きで返り、判定は下流に任せる
+  });
+
+  it('上腕長が0（肩と肘が同じ位置）なら向き・上腕長はどちらも null', () => {
+    const degenerate = landmarksAt(0, {
+      5: lm(0, 0),
+      7: lm(0, 0),
+      9: lm(0, 100),
+      6: lm(50, 0),
+      8: lm(50, 0),
+      10: lm(50, 100),
+    });
+    const p = probeFrame(degenerate, 'elbow-angle');
+    expect(p.shoulderRatio).toBeNull();
+    expect(p.armLenPx).toBeNull();
+  });
+
+  it('wrist-height でも両腕を個別に返す（平均にまとめない）', () => {
+    const p = probeFrame(
+      bothArms({
+        shoulderSepPx: 90,
+        leftWrist: lm(0, 200), // 手首が肩より下 → 負
+        rightWrist: lm(90, -50), // 手首が肩より上 → 正
+      }),
+      'wrist-height',
+    );
+    expect(p.left.sample!.raw).toBeCloseTo(-2.0); // (0 - 200) / 100
+    expect(p.right.sample!.raw).toBeCloseTo(0.5); // (0 - (-50)) / 100
   });
 });

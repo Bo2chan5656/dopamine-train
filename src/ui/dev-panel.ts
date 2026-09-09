@@ -9,6 +9,10 @@ export interface DevPanelDiag {
   readonly fps: number;
   readonly inferMs: number;
   readonly dropped: number;
+  /** カメラが実際に採用した設定。要求値と一致しないことがある。 */
+  readonly source: { readonly width: number; readonly height: number; readonly fps: number } | null;
+  /** 判定に使っている腕の関節別 score。 */
+  readonly joints: { readonly shoulder: number; readonly elbow: number; readonly wrist: number } | null;
 }
 
 export interface DevPanel {
@@ -17,6 +21,8 @@ export interface DevPanel {
   /** 直近5秒の折れ line グラフ用データポイントを追加する。value は 0..1 目安（範囲外も描画は可）。 */
   pushSignal(value: number, atMs: number): void;
   setThresholds(bottomThreshold: number, topThreshold: number): void;
+  /** 関節別 score の合否ライン（検出器の warnScore）を表示に反映する。 */
+  setWarnScore(warnScore: number): void;
 }
 
 /**
@@ -39,14 +45,29 @@ export function createDevPanel(root: HTMLElement): DevPanel {
   let history: Array<{ readonly value: number; readonly at: number }> = [];
   let bottomThreshold = 0.2;
   let topThreshold = 0.8;
-  let lastDiag: DevPanelDiag = { fps: 0, inferMs: 0, dropped: 0 };
+  /** 関節別 score の合否ラインの表示用。setThresholds と同様に外から設定する。 */
+  let warnScore = 0.35;
+  let lastDiag: DevPanelDiag = { fps: 0, inferMs: 0, dropped: 0, source: null, joints: null };
   let lastTracking: TrackingState = { kind: 'no-sensor', reason: 'not started' };
 
   function renderStats(): void {
     if (!statsEl) return;
+    // ★ camera 行が肝。処理 fps が低いとき「暗所でカメラ自身が露光を伸ばして
+    // フレームレートを落としている」のか「こちら側のペーシングで捨てている」のかを
+    // 切り分けるには、カメラが実際に採用した設定を見るしかない。
+    const src = lastDiag.source;
+    const j = lastDiag.joints;
+    // ★ joints 行が運動中のデバッグの本体。無効理由 'low_confidence' は
+    // min(肩,肘,手首) で決まるので、どれが落ちているかはここでしか分からない。
+    // 閾値(warnScore=0.35)を下回っている関節に ← を付ける。
+    const mark = (v: number): string => (v < warnScore ? ' ←' : '');
     statsEl.textContent =
       `fps=${lastDiag.fps} inferMs=${lastDiag.inferMs} dropped=${lastDiag.dropped}\n` +
-      `tracking=${lastTracking.kind}${'minScore' in lastTracking ? ` score=${lastTracking.minScore.toFixed(2)}` : ''}`;
+      `camera=${src ? `${src.width}x${src.height}@${src.fps.toFixed(0)}fps` : '?'}\n` +
+      `tracking=${lastTracking.kind}${'minScore' in lastTracking ? ` score=${lastTracking.minScore.toFixed(2)}` : ''}\n` +
+      (j
+        ? `肩=${j.shoulder.toFixed(2)}${mark(j.shoulder)} 肘=${j.elbow.toFixed(2)}${mark(j.elbow)} 手首=${j.wrist.toFixed(2)}${mark(j.wrist)}  (必要 ${warnScore.toFixed(2)})`
+        : '肩/肘/手首 = 未検出');
   }
 
   function renderGraph(): void {
@@ -101,6 +122,10 @@ export function createDevPanel(root: HTMLElement): DevPanel {
       bottomThreshold = bottom;
       topThreshold = top;
       renderGraph();
+    },
+    setWarnScore(v: number): void {
+      warnScore = v;
+      renderStats();
     },
   };
 }

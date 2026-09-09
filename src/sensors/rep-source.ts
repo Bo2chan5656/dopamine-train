@@ -1,5 +1,5 @@
 import type { Calibration } from '../core/detect/calibration';
-import type { DetectorConfig } from '../core/detect/rep-detector';
+import type { DetectorConfig, DetectorDiagnosticHint } from '../core/detect/rep-detector';
 import { Emitter } from '../core/emitter';
 import type { ArmSide, Ms, RepEvent, RepPhase, TrackingState } from '../core/types';
 import { createKeyboardSource } from './keyboard-source';
@@ -10,7 +10,28 @@ export interface RepSourceEvents {
   rep: RepEvent; // valid / invalid 両方を emit する
   progress: { value: number; phase: RepPhase; at: Ms }; // 0..1。HUDゲージ用（毎フレーム）
   tracking: TrackingState;
-  diag: { fps: number; inferMs: number; dropped: number }; // dev panel 用
+  /** dev panel 用。source はカメラが実際に採用した設定（非CVソースでは null）。 */
+  diag: {
+    fps: number;
+    inferMs: number;
+    dropped: number;
+    source: { width: number; height: number; fps: number } | null;
+    /**
+     * 判定に使っている腕の関節別 score（肩/肘/手首）。
+     * ★ レップの無効理由 'low_confidence' は min(肩,肘,手首) で決まるので、
+     * どの関節が落ちているかを運動中にリアルタイムで見られないと対処できない。
+     */
+    joints: { shoulder: number; elbow: number; wrist: number } | null;
+  };
+  /**
+   * 沈黙診断。「信号は動いているのにレップが出ない」を黙って放置しないための通知。
+   *
+   * ★ 以前は detector が計算したこれを pose-source が**捨てていた**（dev panel が
+   * progress のグラフを見れば分かる、という理屈だったが、グラフを読めるのは
+   * 実装者だけで、運動している本人には何も伝わらない）。計画で「省略してはいけない
+   * もの」の1番目に挙げていた機構が実質存在しない状態だったので、HUD まで配線した。
+   */
+  diagnostic: { hint: DetectorDiagnosticHint; observedMax: number; observedMin: number };
 }
 
 /**
