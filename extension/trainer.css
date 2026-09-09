@@ -1,0 +1,78 @@
+/*
+ * トレーナーウィンドウ専用のレイアウト。src/ui/styles/layout.css の
+ * .dt-app-shell / .dt-topbar / .dt-feed-area をそのまま使い、ここでは
+ * 「フィードが別ウィンドウにある」ことによる差分だけを足す。
+ */
+
+.dt-conn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: #171717;
+  border-bottom: 1px solid #262626;
+  font-family: system-ui, sans-serif;
+  font-size: 0.8125rem;
+  color: #d4d4d4;
+}
+
+.dt-conn__dot {
+  color: #f87171;
+  font-size: 0.75rem;
+}
+.dt-conn[data-connected='true'] .dt-conn__dot {
+  color: #4ade80;
+}
+
+.dt-conn__message {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dt-conn__strategy {
+  font-family: ui-monospace, monospace;
+  font-size: 0.6875rem;
+  color: #737373;
+}
+.dt-conn__strategy[data-degraded='true'] {
+  color: #fbbf24;
+}
+
+.dt-conn__button {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.625rem;
+  background: #262626;
+  color: #f5f5f5;
+  border: 1px solid #404040;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.dt-conn__button:hover {
+  background: #404040;
+}
+
+/*
+ * フィードが別ウィンドウにあるので、このウィンドウの .dt-feed-area は HUD と
+ * キャリブレーションウィザードを載せるだけの領域になる。HUD が中央に来るように
+ * 最低の高さを与える（layout.css の flex:1 だけだと、topbar が伸びたときに潰れる）。
+ */
+.dt-feed-area {
+  min-height: 12rem;
+}
+
+.dt-trainer-note {
+  padding: 0.5rem 0.75rem;
+  font-family: system-ui, sans-serif;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: #a3a3a3;
+  background: #0a0a0a;
+  border-bottom: 1px solid #262626;
+}
+.dt-trainer-note code {
+  color: #d4d4d4;
+}

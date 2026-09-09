@@ -1,8 +1,13 @@
 import type { Ms } from '../types';
 
 /**
- * 視聴クレジットの報酬設計（バンキング方式）。'per-slide'（1レップ1スライド）は
- * 将来の選択肢として型に残すが、今回は 'bank' のみ実装する。
+ * 視聴クレジットの報酬設計。
+ *
+ * - `'bank'`: N レップ → X 秒の視聴クレジット。報酬は「再生できる時間」であり、
+ *   スライドは進まない（自分でスクロールする）。
+ * - `'per-slide'`: 付与のたびに1本送る。N=1 にすれば「1レップ = 1スライド」。
+ *   時間クレジット（X 秒）の仕組みはそのまま使うので、「1回挙げたら次の動画に
+ *   進んで X 秒だけ見られる」という挙動になる。
  */
 export interface CreditPolicy {
   readonly repsPerGrant: number; // N 既定 10
@@ -11,8 +16,10 @@ export interface CreditPolicy {
   readonly creditExpiryMs: Ms | null; // 既定 30分（放置クレジットは失効）。null で無効化
   readonly dailyRepCap: number; // 既定 300 ← 実質の日次視聴上限
   readonly lowWarningSeconds: number; // 既定 10
-  readonly grant: 'bank'; // 'per-slide' は将来。今は実装しない
+  readonly grant: GrantMode;
 }
+
+export type GrantMode = 'bank' | 'per-slide';
 
 export const DEFAULT_POLICY: CreditPolicy = {
   repsPerGrant: 10,
@@ -43,8 +50,27 @@ export function clampPolicy(patch: Partial<CreditPolicy>): CreditPolicy {
       merged.creditExpiryMs === null ? null : clampInt(merged.creditExpiryMs, 60_000, 24 * 3600_000),
     dailyRepCap: clampInt(merged.dailyRepCap, 0, 10_000),
     lowWarningSeconds: clampInt(merged.lowWarningSeconds, 0, secondsPerGrant),
-    grant: 'bank',
+    grant: merged.grant === 'per-slide' ? 'per-slide' : 'bank',
   };
+}
+
+/**
+ * 「1レップ = 1スライド」のプリセット。設定パネルが per-slide に切り替えるときの
+ * 初期値として使う。
+ *
+ * ★ 貯蓄上限を X の2本分に絞るのが要点。既定の600秒のままだと X=30 で20本分
+ * 貯まり、先に20回カールしてから20本連続で見られてしまう（1レップ1スライドの
+ * 体験が壊れる）。clampPolicy 側では強制しない — ユーザーが意図して緩める自由は
+ * 残し、プリセットとして「まともな初期値」を提示するだけにする。
+ */
+export function perSlidePreset(secondsPerSlide = 30): CreditPolicy {
+  return clampPolicy({
+    grant: 'per-slide',
+    repsPerGrant: 1,
+    secondsPerGrant: secondsPerSlide,
+    maxBankedSeconds: secondsPerSlide * 2,
+    lowWarningSeconds: Math.min(5, secondsPerSlide),
+  });
 }
 
 function clampInt(value: number, min: number, max: number): number {

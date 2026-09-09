@@ -1,4 +1,4 @@
-import { clampPolicy, type CreditPolicy } from '../core/credit/policy';
+import { clampPolicy, DEFAULT_POLICY, perSlidePreset, type CreditPolicy, type GrantMode } from '../core/credit/policy';
 import './styles/settings.css';
 
 export interface SettingsPanelOptions {
@@ -26,6 +26,12 @@ export function createSettingsPanel(root: HTMLElement, opts: SettingsPanelOption
   form.innerHTML = `
     <fieldset>
       <legend>報酬設定</legend>
+      <label>方式
+        <select name="grant">
+          <option value="bank">バンキング（N レップ → X 秒。スライドは自分で送る）</option>
+          <option value="per-slide">1レップ1スライド（付与のたびに次の動画へ送る）</option>
+        </select>
+      </label>
       <label>N（レップ/付与）<input type="number" name="repsPerGrant" min="1" max="100" /></label>
       <label>X（付与秒数）<input type="number" name="secondsPerGrant" min="1" max="3600" /></label>
       <label>貯蓄上限（秒）<input type="number" name="maxBankedSeconds" min="0" max="86400" /></label>
@@ -42,6 +48,16 @@ export function createSettingsPanel(root: HTMLElement, opts: SettingsPanelOption
     return el;
   }
 
+  // query() と同じ「見つからなければ throw」パターン。const に非 null で束ねて
+  // おかないと、下の setFields（関数宣言なので巻き上げられる）の中で TS が
+  // narrowing を保持してくれない。
+  function querySelect(name: string): HTMLSelectElement {
+    const el = form.querySelector<HTMLSelectElement>(`select[name="${name}"]`);
+    if (!el) throw new Error(`settings-panel: missing field "${name}"`);
+    return el;
+  }
+  const grantField = querySelect('grant');
+
   const fields: Fields = {
     repsPerGrant: query('repsPerGrant'),
     secondsPerGrant: query('secondsPerGrant'),
@@ -52,6 +68,7 @@ export function createSettingsPanel(root: HTMLElement, opts: SettingsPanelOption
   };
 
   function setFields(policy: CreditPolicy): void {
+    grantField.value = policy.grant;
     fields.repsPerGrant.value = String(policy.repsPerGrant);
     fields.secondsPerGrant.value = String(policy.secondsPerGrant);
     fields.maxBankedSeconds.value = String(policy.maxBankedSeconds);
@@ -60,10 +77,25 @@ export function createSettingsPanel(root: HTMLElement, opts: SettingsPanelOption
     fields.lowWarningSeconds.value = String(policy.lowWarningSeconds);
   }
   setFields(opts.initial);
+  let lastGrant: GrantMode = opts.initial.grant;
 
   form.addEventListener('input', () => {
+    const grant: GrantMode = grantField.value === 'per-slide' ? 'per-slide' : 'bank';
+
+    // 方式そのものを切り替えたときだけ、その方式に合った初期値を入れ直す。
+    // per-slide のまま N/X を弄る場合は当然そのまま尊重する（毎回プリセットで
+    // 上書きしたら設定できない）。
+    if (grant !== lastGrant) {
+      lastGrant = grant;
+      const preset = grant === 'per-slide' ? perSlidePreset() : DEFAULT_POLICY;
+      setFields(preset);
+      opts.onChange(preset);
+      return;
+    }
+
     const expiryMinutes = fields.creditExpiryMinutes.value.trim();
     const patch: Partial<CreditPolicy> = {
+      grant,
       repsPerGrant: Number(fields.repsPerGrant.value),
       secondsPerGrant: Number(fields.secondsPerGrant.value),
       maxBankedSeconds: Number(fields.maxBankedSeconds.value),

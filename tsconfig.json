@@ -5,7 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
-    "types": ["vite/client"],
+    "types": ["vite/client", "chrome"],
 
     "noEmit": true,
     "skipLibCheck": true,
@@ -26,5 +26,13 @@
       "@core/*": ["./src/core/*"]
     }
   },
-  "include": ["src", "tests", "vite.config.ts"]
+  "include": [
+    "src",
+    "tests",
+    "extension",
+    "vite.config.ts",
+    "vite.config.extension.ts",
+    "vite.config.content.ts",
+    "dev-camera.ts"
+  ]
 }
