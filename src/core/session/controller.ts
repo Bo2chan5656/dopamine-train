@@ -45,18 +45,31 @@ export interface SessionControllerDeps {
   readonly settings: Settings;
   /** テスト用に注入する壁時計。Date.now 相当の関数だけを提供する。 */
   readonly clock: { wall(): number };
+  /**
+   * tick() が消費に使う dt の上限（既定 1000ms）。これを超える間隔は「タブ復帰直後の
+   * 巨大ギャップ」とみなして捨てる。
+   *
+   * ★ 呼び出し側の駆動方法に合わせて調整する必要がある。rAF 60Hz で駆動するなら
+   * 既定の 1000 で十分だが、拡張のトレーナーウィンドウ（extension/trainer.ts）は
+   * YouTube のウィンドウに覆われると Chrome がタイマーを1秒に絞るため、dt が
+   * ちょうど 1000 付近に張り付いて既定値だと全部捨てられてしまう
+   * （＝クレジットが減らず無限に視聴できる、という重大な抜け穴になる）。
+   * あちらは 250ms 間隔の setInterval で駆動し、この値を 2000 にしている。
+   */
+  readonly maxTickDtMs?: Ms;
 }
 
 /**
  * RepSource / CreditLedger / Slider を結線するアプリの中核。
  *
- * ★ core/ の一員なので DOM / localStorage / requestAnimationFrame には一切触れない。
- * rAF ループの駆動とタブ可視性の判定は main.ts（ブラウザの入口）の責務であり、ここでは
- * `tick(now, isVisible)` として「時刻と可視性を値として受け取るだけ」にする。これにより
- * vitest の environment:'node' でも各メソッドを直接呼んでユニットテストできる。
+ * ★ core/ の一員なので DOM / localStorage / requestAnimationFrame / chrome.* には
+ * 一切触れない。tick ループの駆動とタブ可視性の判定はブラウザの入口
+ * （extension/trainer.ts）の責務であり、ここでは `tick(now, isVisible)` として
+ * 「時刻と可視性を値として受け取るだけ」にする。これにより vitest の
+ * environment:'node' でも各メソッドを直接呼んでユニットテストできる。
  *
- * M1 時点ではまだ session-machine.ts の状態遷移表（M2）を使わない。ここでの
- * play/pause/lock の決定は「ledger のイベントに反応する」単純なルールで十分なため。
+ * まだ session-machine.ts の状態遷移表は使っていない。ここでの play/pause/lock の
+ * 決定は「ledger のイベントに反応する」単純なルールで足りているため。
  */
 export class SessionController {
   private readonly unsubscribes: Array<() => void> = [];
@@ -82,6 +95,14 @@ export class SessionController {
       ledger.events.on('granted', () => {
         this.deps.sound.rep();
         slider.setLocked(false);
+        // per-slide: 付与のたびに1本送る（N=1 なら「1レップ = 1スライド」）。
+        // bank ではここで送らない — バンキング方式の報酬は「再生できる時間」で
+        // あってスライドではなく、どこを見るかはユーザーが決める。
+        //
+        // ★ 順序（unlock → next → play）が崩れると、shorts-extension-slider では
+        // 「ロック解除前に送ろうとして content script に押し戻される」競合になる。
+        // 順序保証はスライダー実装側の責務（あちらが命令をキューで直列化している）。
+        if (this.deps.settings.credit.grant === 'per-slide') void slider.next('reward');
         if (!slider.isPlaying()) void slider.play();
         this.renderHud();
       }),
@@ -116,7 +137,7 @@ export class SessionController {
 
   /**
    * このコントローラインスタンスの購読解除のみ行う。★ source.stop() は呼ばない —
-   * 設定（credit policy）変更のたびに main.ts が「古い controller を stop して
+   * 設定（credit policy）変更のたびに trainer.ts が「古い controller を stop して
    * 新しい controller を start する」という配線をしており、ここで source.stop()
    * まで呼ぶと、webcam-movenet の場合カメラが毎回停止・再取得されてしまう
    * （keyboard-source 等では無害だったため M1 では気づかなかった実際のバグ）。
@@ -126,16 +147,17 @@ export class SessionController {
     for (const off of this.unsubscribes.splice(0)) off();
   }
 
-  /** main.ts の rAF ループから毎フレーム呼ばれる。副作用は ledger.consume/refresh のみ。 */
+  /** trainer.ts の tick ループから定期的に呼ばれる。副作用は ledger.consume/refresh のみ。 */
   tick(now: Ms, isVisible: boolean): void {
     const { ledger, slider, clock } = this.deps;
     const dt = this.lastTickAt === null ? 0 : now - this.lastTickAt;
     this.lastTickAt = now;
 
-    // dt<=0（初回）や dt>=1000（タブ復帰直後の巨大ギャップ）は消費に使わない。
+    // dt<=0（初回）や大きすぎる dt（タブ復帰直後の巨大ギャップ）は消費に使わない。
     // 後者を弾かないと、バックグラウンドで放置していた分を復帰の瞬間に一気に
-    // 溶かしてしまう（latest-wins ではなく "catch-up" が起きる）。
-    if (isVisible && slider.isPlaying() && dt > 0 && dt < 1000) {
+    // 溶かしてしまう（latest-wins ではなく "catch-up" が起きる）。上限は
+    // 駆動方法に依存するので deps.maxTickDtMs で調整できるようにしてある。
+    if (isVisible && slider.isPlaying() && dt > 0 && dt < (this.deps.maxTickDtMs ?? 1000)) {
       ledger.consume(dt, clock.wall());
     }
     if (now - this.lastRefreshAt > 1000) {

@@ -21,6 +21,19 @@ export function loadSettings(): Settings {
   }
 }
 
+/**
+ * 保存済みの設定があるか。「初回起動時だけ既定値を変えたい」場合に使う
+ * （拡張のトレーナーページは初回だけ per-slide プリセットで始める）。
+ * loadSettings() は未保存時も既定値を返すので、それだけでは区別できない。
+ */
+export function hasSavedSettings(): boolean {
+  try {
+    return localStorage.getItem(KEY_SETTINGS) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export function saveSettings(settings: Settings): void {
   try {
     localStorage.setItem(KEY_SETTINGS, JSON.stringify(settings));

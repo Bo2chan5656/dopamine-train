@@ -7,12 +7,21 @@ export interface SliderEvents {
 }
 
 /**
- * バンキング方式では報酬は「スライドが進むこと」ではなく「再生できる時間」。
- * この層の中核プリミティブは再生ゲートであり、next() は副次的。
- * M2 で local-player-slider（自前プレイヤー）、M6+ で shorts-extension が実装として乗る。
+ * 視聴対象（YouTube Shorts）を操作する境界。
+ *
+ * バンキング方式では報酬は「スライドが進むこと」ではなく「再生できる時間」なので、
+ * この層の中核プリミティブは**再生ゲート**であり next() は副次的。
+ * per-slide 方式（1レップ1スライド）では next() が主役になる。
+ *
+ * ★ 実装は `extension/shorts-extension-slider.ts` の1つだけ。それでもインターフェースを
+ * 残しているのは、`core/session/controller.ts` が `chrome.*` に依存しないための
+ * 遮断膜として機能しているから（controller は Slider の型だけを見ており、
+ * verbatimModuleSyntax によりランタイムコードは一切生成されない）。
+ * かつて自前プレイヤー（local-player-slider）の実装もあったが、YouTube Shorts に
+ * 一本化したため削除した。
  */
 export interface Slider {
-  readonly kind: 'noop' | 'local-player' | 'shorts-extension';
+  readonly kind: 'shorts-extension';
   readonly events: Emitter<SliderEvents>;
 
   attach(): Promise<void>;

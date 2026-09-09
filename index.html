@@ -2,11 +2,21 @@
 <html lang="ja">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-width=device-width" />
-    <title>Dopamine Train</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dopamine Train — トレーナー（dev）</title>
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <!--
+      ★ 拡張のトレーナーページ（extension/trainer.ts）と同じものを localhost で開くための
+      dev 用エントリ。中身は完全に同一で、`npm run dev` の HMR でキャリブレーション
+      ウィザード・HUD・設定パネル・カメラ周りを高速に反復できるようにするために残してある
+      （拡張だけだと、変更のたびに build:ext + 拡張リロードが必要になる）。
+
+      YouTube Shorts への接続は chrome.runtime 越しなので localhost では機能しない。
+      接続バーにその旨が出る。実際にショートを送る動作確認は `npm run build:ext` して
+      拡張として読み込むこと。
+    -->
+    <script type="module" src="/extension/trainer.ts"></script>
   </body>
 </html>
