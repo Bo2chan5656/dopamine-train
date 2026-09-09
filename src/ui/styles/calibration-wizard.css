@@ -46,10 +46,117 @@
 
 .dt-calibration-wizard__error {
   color: #f87171;
+  font-size: 1.125rem;
+  font-weight: 700;
+}
+
+.dt-calibration-wizard__warn {
+  color: #fbbf24;
+  font-size: 0.875rem;
+  text-align: left;
+}
+
+.dt-calibration-wizard__recording {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dt-calibration-wizard__steps {
+  text-align: left;
+  padding-left: 1.25rem;
+  line-height: 1.7;
+}
+
+/* 実測値の表示。「なぜ通らないのか」を判断するための唯一の材料なので、
+   小さくても必ず出す（理由の文言だけでは照明・距離・角度のどれを直すか分からない）。 */
+.dt-calibration-wizard__meta {
+  font-size: 0.75rem;
+  color: #a3a3a3;
+  line-height: 1.6;
+  text-align: left;
+}
+
+.dt-cal-table {
+  width: 100%;
+  margin: 0.75rem 0;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.dt-cal-table th,
+.dt-cal-table td {
+  padding: 0.25rem 0.375rem;
+  border-bottom: 1px solid #262626;
+  text-align: right;
+}
+
+.dt-cal-table th:first-child,
+.dt-cal-table td:first-child {
+  text-align: left;
+}
+
+.dt-cal-table th {
+  color: #737373;
+  font-weight: 400;
+}
+
+.dt-cal-row--chosen {
+  color: #4ade80;
+  font-weight: 700;
+}
+
+.dt-calibration-wizard__secondary {
+  background: #262626 !important;
+  color: #d4d4d4 !important;
+  margin-left: 0.5rem;
 }
 
 .dt-calibration-wizard__success {
   color: #4ade80;
   font-size: 1.25rem;
   font-weight: 700;
+}
+
+/* カウントダウン。2m 離れた場所から読めるサイズにする。 */
+.dt-calibration-wizard__countdown {
+  margin: 0.5rem 0;
+  font-size: 5rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #4ade80;
+  font-variant-numeric: tabular-nums;
+}
+
+.dt-calibration-wizard__instruction {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #f5f5f5;
+}
+
+/*
+ * カウントダウン中のライブ実測値。「記録されている値が自分の意図した姿勢と
+ * 一致しているか」を確認する唯一の手段なので、必ず出す。
+ */
+.dt-calibration-wizard__live {
+  margin: 0.25rem 0;
+  padding: 0.375rem 0.5rem;
+  background: #0a0a0a;
+  border-radius: 0.25rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  color: #4ade80;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 関節別テーブルで「原因」と判定された行。ここを見れば何を直すか分かる。 */
+.dt-cal-row--bad {
+  color: #f87171;
+  font-weight: 700;
+}
+
+/* ライブ表示は関節別スコアを2行で出すので改行を保持する。 */
+.dt-calibration-wizard__live {
+  white-space: pre-line;
+  text-align: left;
 }

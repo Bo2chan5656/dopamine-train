@@ -12,11 +12,29 @@ export interface CameraStats {
   readonly fps: number;
   readonly dropInFlight: number;
   readonly dropPacing: number;
+  /**
+   * カメラが**実際に採用した**設定（要求値ではない）。
+   * ★ 計画で「実際に何が採用されたか必ず確認する」としていたのに実装が漏れていた。
+   * これが見えないと「fps が低いのは暗所でカメラが露光を伸ばしているのか、
+   * こちら側のペーシングの問題なのか」が切り分けられない。
+   */
+  readonly source: { readonly width: number; readonly height: number; readonly fps: number } | null;
 }
 
+/**
+ * ★ 解像度を 640x360 から上げた。
+ *
+ * 以前は「MoveNet の入力は 192x192 なので 640x360 で十分すぎる」という理屈だったが、
+ * これは間違い。MoveNet は**人物の周りを切り出して 192x192 にリサイズする**ので、
+ * 元映像の解像度が高いほど切り出した領域に入る実ピクセル数が増える。1.5〜2m 離れて
+ * 人物がフレームの一部しか占めない状況では、640x360 だと切り出し後の実解像度が
+ * 足りず、手首のような末端の関節から信頼度が落ちる。
+ * 推論負荷はほぼ変わらない（モデル入力は 192x192 のまま。増えるのはカメラの
+ * デコードとクロップのコストだけ）。
+ */
 const DEFAULT_CONSTRAINTS: MediaTrackConstraints = {
-  width: { ideal: 640 },
-  height: { ideal: 360 }, // MoveNet の入力は 192x192。640x360 で十分すぎる
+  width: { ideal: 1280 },
+  height: { ideal: 720 },
   frameRate: { ideal: 24, max: 24 },
   facingMode: 'user',
 };
@@ -55,6 +73,7 @@ export function createCamera(): Camera {
 
   let dropInFlight = 0;
   let dropPacing = 0;
+  let sourceSettings: CameraStats['source'] = null;
   let processedAt: number[] = [];
 
   function onFrame(now: number, metadata: VideoFrameCallbackMetadata): void {
@@ -67,8 +86,15 @@ export function createCamera(): Camera {
       dropInFlight++;
       return;
     }
+    // ★許容を「半周期」にしている。以前は period - 2（固定2ms）だったが、これだと
+    // カメラの実フレームレートが目標を少し上回るだけで**実効レートが半分に落ちる**。
+    // 例: カメラ30fps(33.3ms間隔) / 目標24fps(period=41.7ms, 閾値39.7ms) のとき、
+    // 33.3 < 39.7 なので1枚おきに捨てられ、24fps を狙って 15fps しか出ない
+    // （実機で fps=12, dropped=5356 として観測された）。
+    // 半周期(20.8ms)なら 33.3ms 間隔の入力はすべて通る。上振れは in-flight ガードと
+    // 推論時間(約20ms)が吸収する。
     const period = 1000 / targetFps;
-    if (now - lastRunMs < period - 2) {
+    if (now - lastRunMs < period * 0.5) {
       dropPacing++;
       return;
     }
@@ -115,6 +141,17 @@ export function createCamera(): Camera {
       await video.play();
       await waitForReadyFrame();
 
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        const st = track.getSettings();
+        sourceSettings = {
+          width: st.width ?? 0,
+          height: st.height ?? 0,
+          fps: st.frameRate ?? 0,
+        };
+        console.log('[camera] 採用された設定', sourceSettings);
+      }
+
       running = true;
       lastPresentedFrames = -1;
       video.requestVideoFrameCallback(onFrame);
@@ -136,7 +173,7 @@ export function createCamera(): Camera {
       targetFps = fps;
     },
     getStats(): CameraStats {
-      return { fps: processedAt.length, dropInFlight, dropPacing };
+      return { fps: processedAt.length, dropInFlight, dropPacing, source: sourceSettings };
     },
   };
 }

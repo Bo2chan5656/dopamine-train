@@ -61,3 +61,19 @@
   font-size: clamp(1.25rem, 3vw, 1.75rem);
   color: #fbbf24;
 }
+
+/*
+ * 沈黙診断。「動かしているのにレップが増えない」理由を運動中の本人に伝える枠。
+ * 2m 離れて読める必要があるので、reason より大きく、目立つ色にする。
+ */
+.dt-hud__diagnostic:not(:empty) {
+  margin-top: 0.5rem;
+  padding: 0.375rem 0.625rem;
+  background: rgba(251, 191, 36, 0.15);
+  border-left: 4px solid #fbbf24;
+  border-radius: 0.25rem;
+  color: #fbbf24;
+  font-size: 1.125rem;
+  font-weight: 700;
+  line-height: 1.4;
+}

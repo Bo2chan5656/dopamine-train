@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { Calibration } from '../src/core/detect/calibration';
+import { denormalize, type Calibration } from '../src/core/detect/calibration';
 import { createRepDetector, DEFAULT_DETECTOR_CONFIG, type DetectorConfig, type DetectorOutput } from '../src/core/detect/rep-detector';
-import type { RepEvent, TrackingState } from '../src/core/types';
+import type { RepEvent, SignalSample, TrackingState } from '../src/core/types';
 import {
   asymmetricReps,
   halfReps,
@@ -131,16 +131,40 @@ describe('RepDetector: 妥当性検査（validity）', () => {
   });
 });
 
-describe('RepDetector: 上端に届かない（threshold_unreachable 診断）', () => {
-  it('上端が0.75までしか届かない×20 → valid 0 かつ threshold_unreachable が発火する', () => {
+describe('RepDetector: 沈黙診断', () => {
+  it('上端が0.75までしか届かない×20 → valid 0 かつ top_unreachable が発火する', () => {
     const samples = sineWave(CAL, { fps: 24, cycles: 20, cycleMs: 1500, ampCenter: 0.375, ampRadius: 0.375 });
     const out = runAll(CFG, CAL, samples);
     expect(reps(out)).toHaveLength(0);
     const diags = diagnostics(out);
     expect(diags.length).toBeGreaterThan(0);
-    expect(diags[0]!.hint).toBe('threshold_unreachable');
+    expect(diags[0]!.hint).toBe('top_unreachable');
     expect(diags[0]!.observedMax).toBeGreaterThan(0.35);
     expect(diags[0]!.observedMax).toBeLessThan(CFG.topThreshold);
+  });
+
+  it('★上端は超えるが谷が0.4止まりで下端に戻らない → valid 0 かつ bottom_unreachable が発火する', () => {
+    // 実機の信号グラフで踏んだケース。シュミットトリガは「下端に入ってから上端を
+    // 超える」ことでレップを数えるので、下端(0.2)に戻らなければ永久に0本のまま。
+    // 旧実装の診断条件は sessionMax < topThreshold だったため、この状況では
+    // 何の警告も出ないという一番まずい沈黙が起きていた。
+    // ampRadius は One-Euro の減衰を見込んで広く取る（狭いとフィルタ後のピークが
+    // 0.8 に届かず top_unreachable 側になってしまう）。生値は [0.4, 1.2]。
+    const samples = sineWave(CAL, { fps: 24, cycles: 20, cycleMs: 1500, ampCenter: 0.8, ampRadius: 0.4 });
+    const out = runAll(CFG, CAL, samples);
+    expect(reps(out)).toHaveLength(0);
+    const diags = diagnostics(out);
+    expect(diags.length).toBeGreaterThan(0);
+    expect(diags[0]!.hint).toBe('bottom_unreachable');
+    expect(diags[0]!.observedMax).toBeGreaterThanOrEqual(CFG.topThreshold);
+    expect(diags[0]!.observedMin).toBeGreaterThan(CFG.bottomThreshold);
+  });
+
+  it('正常にレップが出ている間は診断が出ない（誤警告しない）', () => {
+    const samples = sineWave(CAL, { fps: 24, cycles: 20, cycleMs: 1500 });
+    const out = runAll(CFG, CAL, samples);
+    expect(reps(out).length).toBeGreaterThan(15);
+    expect(diagnostics(out)).toHaveLength(0);
   });
 });
 
@@ -198,13 +222,13 @@ describe('RepDetector: 信頼度ゲート', () => {
 });
 
 describe('RepDetector: reset()', () => {
-  it('reset 後は phase/lost/sessionMax が初期状態に戻る', () => {
+  it('reset 後は phase/lost/sessionMax/sessionMin が初期状態に戻る', () => {
     const detector = createRepDetector(CFG, CAL, 'right');
     for (const s of sineWave(CAL, { fps: 24, cycles: 2, cycleMs: 1500 })) detector.update(s);
     expect(detector.snapshot().sessionMax).toBeGreaterThan(0); // 稼働した形跡がある
 
     detector.reset();
-    expect(detector.snapshot()).toEqual({ phase: 'unknown', lost: false, sessionMax: 0 });
+    expect(detector.snapshot()).toEqual({ phase: 'unknown', lost: false, sessionMax: 0, sessionMin: 1 });
   });
 
   it('reset 後、新しいレップ計上が0件から正しく再開する', () => {
@@ -215,5 +239,134 @@ describe('RepDetector: reset()', () => {
     let out: DetectorOutput[] = [];
     for (const s of sineWave(CAL, { fps: 24, cycles: 4, cycleMs: 1500 })) out = out.concat(detector.update(s));
     expect(reps(out)).toHaveLength(4);
+  });
+});
+
+describe('RepDetector: 下端での休憩', () => {
+  /** norm 列を fps のサンプル列にする（休憩を含む長い列を組み立てるため） */
+  function fromNorms(norms: readonly number[], fps = 22): SignalSample[] {
+    const dt = 1000 / fps;
+    return norms.map((n, i) => ({ at: i * dt, raw: denormalize(n, CAL), score: 0.9 }));
+  }
+  const hold = (n: number, ms: number, fps = 22): number[] =>
+    Array.from({ length: Math.round((ms / 1000) * fps) }, () => n);
+  const ramp = (from: number, to: number, ms: number, fps = 22): number[] => {
+    const k = Math.max(2, Math.round((ms / 1000) * fps));
+    return Array.from({ length: k }, (_, i) => from + ((to - from) * i) / (k - 1));
+  };
+  /** 下端で restMs 休んでから2本目を挙げる、という列 */
+  const twoRepsWithRest = (restMs: number): number[] => [
+    ...hold(0, 800),
+    ...ramp(0, 1, 600),
+    ...hold(1, 600),
+    ...ramp(1, 0, 800),
+    ...hold(0, restMs),
+    ...ramp(0, 1, 600),
+    ...hold(1, 300),
+  ];
+
+  it('★下端で30秒休んでも2本目が valid（concentricMs に休憩時間を含めない）', () => {
+    // per-slide 方式では1レップごとに動画を30秒見る＝下端で30秒休む。
+    // concentricMs が「下端ゾーンに入ってからの経過時間」だった頃は
+    // concentricMs=30636 → too_slow で2本目以降が全部無効になっていた
+    // （＝最初の1回だけ動いて、あとは何をしても解放されない）。
+    const r = reps(runAll(CFG, CAL, fromNorms(twoRepsWithRest(30_000))));
+    expect(r).toHaveLength(2);
+    expect(r[1]!.valid).toBe(true);
+    expect(r[1]!.rejects).toEqual([]);
+    // 実際の挙上時間（約600msのランプ + フィルタ遅れ）に収まっていること
+    expect(r[1]!.concentricMs).toBeLessThan(CFG.maxConcentricMs);
+    expect(r[1]!.concentricMs).toBeGreaterThanOrEqual(CFG.minConcentricMs);
+  });
+
+  it('休憩が短い場合も従来どおり valid', () => {
+    const r = reps(runAll(CFG, CAL, fromNorms(twoRepsWithRest(1000))));
+    expect(r).toHaveLength(2);
+    expect(r.every((x) => x.valid)).toBe(true);
+  });
+
+  it('休憩の長さによらず concentricMs がほぼ一定になる（休憩時間が混ざらない証明）', () => {
+    const short = reps(runAll(CFG, CAL, fromNorms(twoRepsWithRest(1000))))[1]!.concentricMs;
+    const long = reps(runAll(CFG, CAL, fromNorms(twoRepsWithRest(30_000))))[1]!.concentricMs;
+    expect(Math.abs(long - short)).toBeLessThan(150);
+  });
+
+  it('挙上そのものが遅い場合は依然として too_slow で弾く（緩めすぎていない）', () => {
+    // 0.2→0.8 の区間（ランプ全体の60%）が maxConcentricMs(4000) を超えるよう
+    // 12秒かけて上げる → 4000 < 12000*0.6 = 7200ms なので too_slow。
+    const r = reps(runAll(CFG, CAL, fromNorms([...hold(0, 800), ...ramp(0, 1, 12_000), ...hold(1, 300)])));
+    expect(r).toHaveLength(1);
+    expect(r[0]!.valid).toBe(false);
+    expect(r[0]!.rejects).toContain('too_slow');
+  });
+});
+
+describe('RepDetector: 運動中の low_confidence（体がよく見えていません）', () => {
+  function fromNorms(norms: readonly number[], score: number | ((i: number) => number), fps = 22): SignalSample[] {
+    const dt = 1000 / fps;
+    return norms.map((n, i) => ({
+      at: i * dt,
+      raw: denormalize(n, CAL),
+      score: typeof score === 'function' ? score(i) : score,
+    }));
+  }
+  const hold = (n: number, ms: number, fps = 22): number[] =>
+    Array.from({ length: Math.round((ms / 1000) * fps) }, () => n);
+  const ramp = (from: number, to: number, ms: number, fps = 22): number[] => {
+    const k = Math.max(2, Math.round((ms / 1000) * fps));
+    return Array.from({ length: k }, (_, i) => from + ((to - from) * i) / (k - 1));
+  };
+
+  it('信頼度が一貫して warnScore 以上なら valid', () => {
+    const norms = [...hold(0, 500), ...ramp(0, 1, 700), ...hold(1, 300)];
+    const r = reps(runAll(CFG, CAL, fromNorms(norms, 0.6)));
+    expect(r).toHaveLength(1);
+    expect(r[0]!.valid).toBe(true);
+  });
+
+  it('挙上中に warnScore を割るフレームがあれば low_confidence', () => {
+    const norms = [...hold(0, 500), ...ramp(0, 1, 700), ...hold(1, 300)];
+    // 挙上の途中（下端を出たあと）で1フレームだけ落とす
+    const dipAt = Math.round((0.5 + 0.35) * 22);
+    const r = reps(runAll(CFG, CAL, fromNorms(norms, (i) => (i === dipAt ? 0.31 : 0.6))));
+    expect(r).toHaveLength(1);
+    expect(r[0]!.rejects).toContain('low_confidence');
+    expect(r[0]!.minScore).toBeCloseTo(0.31);
+  });
+
+  it('★下端で休んでいる間に信頼度が落ちても、次のレップは無効にならない', () => {
+    // これが「実際に挙げてもカウントされない」の主因だったバグ。
+    // repMinScore が enterBottom からの最小値だったため、下端の休憩30秒のうち
+    // 1フレーム落ちるだけで次のレップが low_confidence になっていた。
+    // per-slide 方式では1レップごとに動画を30秒見る＝下端で30秒休むので致命的。
+    const fps = 22;
+    const norms = [
+      ...hold(0, 500, fps),
+      ...ramp(0, 1, 700, fps),
+      ...hold(1, 400, fps),
+      ...ramp(1, 0, 800, fps),
+      ...hold(0, 10_000, fps), // 下端で10秒休む
+      ...ramp(0, 1, 700, fps),
+      ...hold(1, 300, fps),
+    ];
+    // 休憩区間のちょうど中央で大きく信頼度を落とす（腕を組んだ・体をひねった等）
+    const restStart = Math.round((0.5 + 0.7 + 0.4 + 0.8) * fps);
+    const dipAt = restStart + Math.round(5 * fps);
+    const r = reps(runAll(CFG, CAL, fromNorms(norms, (i) => (i === dipAt ? 0.31 : 0.6))));
+
+    expect(r).toHaveLength(2);
+    expect(r[1]!.valid).toBe(true);
+    expect(r[1]!.rejects).toEqual([]);
+    // 2本目の minScore は挙上中の値のみを反映している
+    expect(r[1]!.minScore).toBeCloseTo(0.6);
+  });
+
+  it('warnScore の既定値がキャリブレーションの受理ゲート(0.35)と一致している', () => {
+    // 入口(キャリブレーション)より出口(運動中)が厳しいと
+    // 「キャリブレーションは通るのに全レップ弾かれる」になる。
+    expect(DEFAULT_DETECTOR_CONFIG.warnScore).toBeCloseTo(0.35);
+    // フレーム破棄の閾値は warnScore 以下であること（破棄されない値が即無効に
+    // なる帯が広がりすぎないように）。
+    expect(DEFAULT_DETECTOR_CONFIG.minScore).toBeLessThanOrEqual(DEFAULT_DETECTOR_CONFIG.warnScore);
   });
 });
