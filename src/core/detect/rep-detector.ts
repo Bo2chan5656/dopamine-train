@@ -42,17 +42,53 @@ export interface DetectorConfig {
   readonly filter: OneEuroConfig;
 }
 
+/**
+ * 既定の検出設定。★「取りこぼさないこと」を優先して緩めた profile。
+ *
+ * 実機で「実際に挙げてもカウントされないのが大半」という状態が続いたため、
+ * 精度よりも確実性を採る方針に切り替えた。緩めた項目と理由:
+ *
+ *  - topThreshold 0.80 → 0.75 / bottomThreshold 0.20 → 0.25
+ *      端への到達を必要とする幅を 60% → 50% に縮めた。キャリブレーション時の
+ *      可動域より実際の動作が浅くなっても端に届く。
+ *  - minRomRatio 0.70 → 0.40
+ *      ★これは実質バグだった。romRatio は「上端到達時の値 − 谷の値」なので、
+ *      構造上の最小値は topThreshold − bottomThreshold（旧設定で 0.6）。
+ *      0.7 を要求していたため**ぎりぎり通過したレップは必ず short_rom で
+ *      弾かれていた**（計画では no-op のはずだと書かれていた）。新しい閾値では
+ *      構造上の最小が 0.5 なので、0.4 なら本当に no-op（保険）になる。
+ *  - minScore 0.30 → 0.20 / warnScore 0.35 → 0.20
+ *      MoveNet 内部の MIN_CROP_KEYPOINT_SCORE と同じ 0.2 まで下げた。
+ *      warnScore を minScore と同値にしたので、**'low_confidence' は事実上
+ *      発火しなくなる**（フレーム破棄を生き延びた時点で必ず minScore 以上）。
+ *      信頼度の可視化は dev panel の関節別ライブ表示に任せる — 判定を止める
+ *      よりも「見える化して本人が直す」ほうが実用的だと判断した。
+ *  - lostAfterMs 700 → 1200
+ *      一瞬見失っただけで進行中のレップを破棄しないようにした。
+ *  - minConcentricMs 180 → 150
+ *      閾値幅を縮めた分、通過時間も短くなるため合わせて下げた。
+ *
+ * ★ 緩めていない項目とその理由:
+ *  - minEccentricMs 500 は**安全機構**。下ろす動作が速すぎる（重力任せ）のは
+ *    肘の腱への衝撃そのものなので、カウントのために下げてはいけない。
+ *  - minInterRepMs 500 はチャタリング（信号の振動を連続レップと誤認）の防止。
+ *  - maxConcentricMs 4000 は上限側なので取りこぼしには寄与しない。
+ *
+ * ★ トレードオフ: 偽陽性（カールでない動きが数えられる）が増える。歩き回る・
+ * 腕を振るだけで計上される可能性がある。「数えられないより数えられすぎるほうが
+ * まし」という判断であり、精度を戻したい場合はこの表の値を元に戻せばよい。
+ */
 export const DEFAULT_DETECTOR_CONFIG: DetectorConfig = {
-  topThreshold: 0.8,
-  bottomThreshold: 0.2,
-  minConcentricMs: 180,
+  topThreshold: 0.75,
+  bottomThreshold: 0.25,
+  minConcentricMs: 150,
   maxConcentricMs: 4000,
-  minEccentricMs: 500,
+  minEccentricMs: 500, // ★安全機構。下げない
   minInterRepMs: 500,
-  minRomRatio: 0.7,
-  minScore: 0.3,
-  warnScore: 0.35,
-  lostAfterMs: 700,
+  minRomRatio: 0.4,
+  minScore: 0.2,
+  warnScore: 0.2, // = minScore なので low_confidence は事実上出ない
+  lostAfterMs: 1200,
   filterResetGapMs: 300,
   filter: { minCutoff: 1.0, beta: 1.0, dCutoff: 1.0 },
 };
