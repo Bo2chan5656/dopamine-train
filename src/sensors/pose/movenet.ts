@@ -35,7 +35,11 @@ export async function loadMoveNet(): Promise<MoveNetHandle> {
   const detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
     modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
     enableSmoothing: false,
-    minPoseScore: 0.3,
+    // ★ 0.3 → 0.2。これを下回ると estimatePoses が姿勢を1つも返さず、
+    // pose-source 側で score:0 のダミーになって tracking-lost に近づく。
+    // MoveNet 内部の既定は DEFAULT_MIN_POSE_SCORE=0.25 なので、
+    // 0.2 はそれより緩い＝取りこぼしを最小にする設定。
+    minPoseScore: 0.2,
     modelUrl: MODEL_URL,
   });
 

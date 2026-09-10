@@ -100,10 +100,12 @@ describe('RepDetector: 妥当性検査（validity）', () => {
     // （設計上正しい: types.ts の RepEvent.eccentricMs の定義を参照）。ウォームアップを
     // 1回追加し、検証対象の5本すべてに直前の上端が存在するようにする。
     //
-    // 生成器の下降時間は 50ms に設定しているが、One-Euro Filter の群遅延により
-    // 実測 eccentricMs は約458ms（生値ではなく、フィルタ後の値で閾値通過を判定する
-    // 設計のため）。450ms 台であれば minEccentricMs(500ms) を安定して下回る。
-    const samples = asymmetricReps(CAL, { count: 6, concentricMs: 1500, eccentricMs: 50, fps: 24 });
+    // ★ eccentricMs は「上端閾値を最初に超えた時刻 → 下端ゾーンに入った時刻」で
+    // 測る。つまり**上端での滞留時間も含まれる**ため、上昇が長いほど値が大きくなり
+    // fast_eccentric に掛かりにくい（既知の限界。詳細は下のコメント）。
+    // 閾値帯を 0.8/0.2 から 0.75/0.25 に狭めたことで上端到達がさらに早まったので、
+    // 上昇を 1500ms → 600ms に縮めて「下ろすのが速い」状況を作る。
+    const samples = asymmetricReps(CAL, { count: 6, concentricMs: 600, eccentricMs: 50, fps: 24 });
     const out = runAll(CFG, CAL, samples);
     const r = reps(out);
     expect(r).toHaveLength(6);
@@ -202,12 +204,12 @@ describe('RepDetector: トラッキングロスト', () => {
     // 一瞬で lost にする: 低スコアを lostAfterMs 以上続ける
     let out: DetectorOutput[] = [];
     out = out.concat(detector.update({ at: 0, raw: 100, score: 0.01 }));
-    out = out.concat(detector.update({ at: 800, raw: 100, score: 0.01 })); // lostAfterMs(700)超過 → lost
+    out = out.concat(detector.update({ at: 1500, raw: 100, score: 0.01 })); // lostAfterMs(1200)超過 → lost
     expect(trackings(out).some((s) => s.kind === 'lost')).toBe(true);
 
     // 復帰直後、いきなり中間値（0.5相当）で来ても、それだけではレップにならない
     const midRaw = CAL.bottomRaw + 0.5 * (CAL.topRaw - CAL.bottomRaw);
-    out = out.concat(detector.update({ at: 850, raw: midRaw, score: 0.9 }));
+    out = out.concat(detector.update({ at: 1550, raw: midRaw, score: 0.9 }));
     expect(reps(out)).toHaveLength(0);
     expect(detector.snapshot().phase).toBe('unknown');
   });
@@ -324,14 +326,28 @@ describe('RepDetector: 運動中の low_confidence（体がよく見えていま
     expect(r[0]!.valid).toBe(true);
   });
 
-  it('挙上中に warnScore を割るフレームがあれば low_confidence', () => {
+  it('★信頼度で落とされたレップが出ないこと（warnScore = minScore にした設計）', () => {
+    // 「実際に挙げてもカウントされない」を無くすため、warnScore を minScore と
+    // 同値にして low_confidence を事実上無効化した。フレーム破棄(minScore)を
+    // 生き延びた時点で必ず minScore 以上なので、この理由では弾かれない。
+    // 信頼度の可視化は dev panel の関節別ライブ表示が担う。
     const norms = [...hold(0, 500), ...ramp(0, 1, 700), ...hold(1, 300)];
-    // 挙上の途中（下端を出たあと）で1フレームだけ落とす
     const dipAt = Math.round((0.5 + 0.35) * 22);
-    const r = reps(runAll(CFG, CAL, fromNorms(norms, (i) => (i === dipAt ? 0.31 : 0.6))));
+    const r = reps(runAll(CFG, CAL, fromNorms(norms, (i) => (i === dipAt ? 0.25 : 0.6))));
     expect(r).toHaveLength(1);
-    expect(r[0]!.rejects).toContain('low_confidence');
-    expect(r[0]!.minScore).toBeCloseTo(0.31);
+    expect(r[0]!.rejects).not.toContain('low_confidence');
+    expect(r[0]!.valid).toBe(true);
+  });
+
+  it('minScore を割るフレームは破棄され、信号にもレップにも混ざらない', () => {
+    // 判定を緩めても「見えていないフレームを使う」わけではない。
+    const norms = [...hold(0, 500), ...ramp(0, 1, 700), ...hold(1, 300)];
+    const dipAt = Math.round((0.5 + 0.35) * 22);
+    const out = runAll(CFG, CAL, fromNorms(norms, (i) => (i === dipAt ? 0.05 : 0.6)));
+    const r = reps(out);
+    expect(r).toHaveLength(1);
+    // 破棄されたフレームは minScore に反映されない（0.05 は混ざらない）
+    expect(r[0]!.minScore).toBeGreaterThanOrEqual(CFG.minScore);
   });
 
   it('★下端で休んでいる間に信頼度が落ちても、次のレップは無効にならない', () => {
@@ -361,12 +377,18 @@ describe('RepDetector: 運動中の low_confidence（体がよく見えていま
     expect(r[1]!.minScore).toBeCloseTo(0.6);
   });
 
-  it('warnScore の既定値がキャリブレーションの受理ゲート(0.35)と一致している', () => {
-    // 入口(キャリブレーション)より出口(運動中)が厳しいと
-    // 「キャリブレーションは通るのに全レップ弾かれる」になる。
-    expect(DEFAULT_DETECTOR_CONFIG.warnScore).toBeCloseTo(0.35);
-    // フレーム破棄の閾値は warnScore 以下であること（破棄されない値が即無効に
-    // なる帯が広がりすぎないように）。
-    expect(DEFAULT_DETECTOR_CONFIG.minScore).toBeLessThanOrEqual(DEFAULT_DETECTOR_CONFIG.warnScore);
+  it('warnScore <= minScore（運動中に信頼度でレップを落とさない設定であること）', () => {
+    // 入口(キャリブレーション 0.35)より出口(運動中)が厳しいと
+    // 「キャリブレーションは通るのに全レップ弾かれる」になる。今は出口を
+    // minScore と同値にして、その帯自体を無くしてある。
+    expect(DEFAULT_DETECTOR_CONFIG.warnScore).toBeLessThanOrEqual(DEFAULT_DETECTOR_CONFIG.minScore);
+  });
+
+  it('minRomRatio が構造上の最小値を下回っている（short_rom が誤発火しないこと）', () => {
+    // ★ romRatio の構造上の最小値は topThreshold - bottomThreshold。
+    // minRomRatio がそれ以上だと「ぎりぎり通過したレップ」が必ず short_rom で
+    // 弾かれる（旧設定 0.7 > 0.6 で実際に起きていた）。
+    const structuralMin = DEFAULT_DETECTOR_CONFIG.topThreshold - DEFAULT_DETECTOR_CONFIG.bottomThreshold;
+    expect(DEFAULT_DETECTOR_CONFIG.minRomRatio).toBeLessThan(structuralMin);
   });
 });
